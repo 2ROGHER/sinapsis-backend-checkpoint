@@ -1,0 +1,377 @@
+openapi: 3.0.3
+info:
+  title: Sinapsis — Campañas de Marketing SMS API
+  description: >-
+    API para la prueba técnica de Backend Semi-Senior de Sinapsis. Expone un
+    endpoint de reporte de mensajes activos programados por estado de envío
+    (filtrable por mes obligatorio y cliente opcional) y un endpoint para que
+    los clientes programen campañas de marketing SMS con sus mensajes.
+
+
+    Arquitectura: hexagonal (Ports & Adapters) + DDD, implementada en
+    TypeScript + Express, ejecutada como una única función AWS Lambda detrás
+    de API Gateway HTTP API (vía `serverless-http`). Ver `docs/ARCHITECTURE.md`
+    para el detalle de las decisiones de diseño.
+  version: 1.0.0
+  contact:
+    name: Roger Mestanza
+    email: rogers.mestanza@gmail.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+security: []
+# Sin autenticación: el enunciado de la prueba técnica no pidió un esquema de
+# auth para estos endpoints. `security: []` lo deja explícito en el contrato
+# (en vez de omitirlo en silencio) para que quede claro que es una decisión,
+# no un olvido.
+
+servers:
+  - url: http://localhost:3000/v1
+    description: Local (serverless-offline)
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com/v1
+    description: AWS (desplegado — ver docs/DEPLOY.md)
+    variables:
+      apiId:
+        default: your-api-id
+      region:
+        default: us-east-1
+
+tags:
+  - name: Health
+    description: Verificación de disponibilidad del servicio
+  - name: Reportes
+    description: Reporte de mensajes activos programados por estado de envío
+  - name: Campañas
+    description: Programación de campañas de marketing SMS
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Verifica que el servicio esté disponible. No consulta la base de datos. Plus de trazabilidad muy importante.
+      operationId: getHealth
+      responses:
+        '200':
+          description: El servicio está operativo.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /reports/messages-by-status:
+    get:
+      tags: [Reportes]
+      summary: Reporte de mensajes activos programados, clasificados por estado de envío
+      description: >-
+        Cuenta los mensajes ACTIVOS (`mensaje.estado = 1`) cuyo `fechaHoraEnvio`
+        cae dentro del mes indicado, agrupados por `estadoEnvio`
+        (Pendiente/Enviado/Error). Filtro por mes obligatorio; filtro por
+        cliente opcional (solo cuenta mensajes de campañas pertenecientes a
+        usuarios de ese cliente). El resumen siempre incluye los 3 estados,
+        con `cantidad: 0` cuando no hay mensajes en ese estado.
+      operationId: getMessagesByStatusReport
+      parameters:
+        - name: mes
+          in: query
+          required: true
+          description: Mes a reportar, formato `YYYY-MM`.
+          schema:
+            type: string
+            pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+          example: '2026-11'
+        - name: idCliente
+          in: query
+          required: false
+          description: Filtra el reporte a los mensajes de campañas de este cliente.
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+      responses:
+        '200':
+          description: Reporte generado correctamente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagesByStatusReport'
+              examples:
+                conClienteFiltrado:
+                  summary: mes=2026-11&idCliente=1 (datos del seed)
+                  value:
+                    mes: '2026-11'
+                    idCliente: 1
+                    resumen:
+                      - estadoEnvio: 1
+                        estado: Pendiente
+                        cantidad: 2
+                      - estadoEnvio: 2
+                        estado: Enviado
+                        cantidad: 3
+                      - estadoEnvio: 3
+                        estado: Error
+                        cantidad: 1
+                    total: 6
+                sinMensajesEnElMes:
+                  summary: Mes sin mensajes — los 3 estados en 0
+                  value:
+                    mes: '2026-01'
+                    idCliente: null
+                    resumen:
+                      - estadoEnvio: 1
+                        estado: Pendiente
+                        cantidad: 0
+                      - estadoEnvio: 2
+                        estado: Enviado
+                        cantidad: 0
+                      - estadoEnvio: 3
+                        estado: Error
+                        cantidad: 0
+                    total: 0
+        '400':
+          description: >-
+            Parámetros inválidos: falta `mes`, `mes` no cumple el formato
+            YYYY-MM, o `idCliente` no es numérico.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '404':
+          description: El `idCliente` indicado no existe.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainErrorResponse'
+              example:
+                error: CLIENTE_NO_ENCONTRADO
+                message: 'No existe un cliente con idCliente=999'
+        '500':
+          description: Error inesperado del servidor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorResponse'
+
+  /campaigns:
+    post:
+      tags: [Campañas]
+      summary: Programar una campaña de marketing SMS
+      description: >-
+        Crea una campaña y sus mensajes asociados de forma atómica (todo o
+        nada). Todos los mensajes creados nacen con `estadoEnvio=1`
+        (Pendiente) y `estado=1` (activo). El `idUsuario` debe existir y estar
+        activo.
+      operationId: scheduleCampaign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleCampaignRequest'
+            example:
+              idUsuario: 1
+              nombre: Promo Black Friday 2026
+              fechaHoraProgramacion: '2026-11-20T09:00:00.000Z'
+              mensajes:
+                - mensaje: '¡Black Friday llegó! 50% OFF en toda la tienda'
+                  fechaHoraEnvio: '2026-11-20T09:05:00.000Z'
+                - mensaje: 'Últimas horas de Black Friday, no te lo pierdas'
+                  fechaHoraEnvio: '2026-11-20T18:00:00.000Z'
+      responses:
+        '201':
+          description: Campaña creada correctamente, con sus mensajes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScheduleCampaignResponse'
+        '400':
+          description: >-
+            Payload inválido: faltan campos requeridos, `mensajes` está vacío,
+            algún texto supera 160 caracteres, o alguna fecha no es ISO 8601
+            válida (`ValidationError`, con el detalle por campo). También se
+            devuelve 400 con un código de negocio cuando la entidad rechaza
+            los datos, p. ej. `NOMBRE_CAMPANIA_INVALIDO` si el nombre es solo
+            espacios en blanco.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ValidationError'
+                  - $ref: '#/components/schemas/DomainErrorResponse'
+        '404':
+          description: El `idUsuario` indicado no existe.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainErrorResponse'
+              example:
+                error: USUARIO_NO_ENCONTRADO
+                message: 'No existe un usuario con idUsuario=999'
+        '409':
+          description: El `idUsuario` existe pero está inactivo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainErrorResponse'
+              example:
+                error: USUARIO_INACTIVO
+                message: 'El usuario idUsuario=4 está inactivo y no puede programar campañas'
+        '500':
+          description: Error inesperado del servidor (incluye rollback de transacción).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorResponse'
+
+components:
+  schemas:
+    ResumenPorEstado:
+      type: object
+      required: [estadoEnvio, estado, cantidad]
+      properties:
+        estadoEnvio:
+          type: integer
+          enum: [1, 2, 3]
+          description: '1=Pendiente, 2=Enviado, 3=Error'
+        estado:
+          type: string
+          enum: [Pendiente, Enviado, Error]
+        cantidad:
+          type: integer
+          minimum: 0
+
+    MessagesByStatusReport:
+      type: object
+      required: [mes, idCliente, resumen, total]
+      properties:
+        mes:
+          type: string
+          example: '2026-11'
+        idCliente:
+          type: integer
+          nullable: true
+        resumen:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResumenPorEstado'
+          minItems: 3
+          maxItems: 3
+        total:
+          type: integer
+          minimum: 0
+
+    ScheduleCampaignMensajeRequest:
+      type: object
+      required: [mensaje, fechaHoraEnvio]
+      properties:
+        mensaje:
+          type: string
+          minLength: 1
+          maxLength: 160
+          example: '¡Black Friday llegó! 50% OFF en toda la tienda'
+        fechaHoraEnvio:
+          type: string
+          format: date-time
+
+    ScheduleCampaignRequest:
+      type: object
+      required: [idUsuario, nombre, fechaHoraProgramacion, mensajes]
+      properties:
+        idUsuario:
+          type: integer
+          minimum: 1
+        nombre:
+          type: string
+          minLength: 1
+          maxLength: 200
+        fechaHoraProgramacion:
+          type: string
+          format: date-time
+        mensajes:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ScheduleCampaignMensajeRequest'
+
+    ScheduleCampaignMensajeResponse:
+      allOf:
+        - $ref: '#/components/schemas/ScheduleCampaignMensajeRequest'
+        - type: object
+          required: [idMensaje, estadoEnvio, estado]
+          properties:
+            idMensaje:
+              type: integer
+            estadoEnvio:
+              type: integer
+              enum: [1]
+              description: Siempre 1 (Pendiente) en la creación.
+            estado:
+              type: integer
+              enum: [0, 1]
+
+    ScheduleCampaignResponse:
+      type: object
+      required: [idCampania, nombre, idUsuario, fechaHoraProgramacion, estado, mensajes]
+      properties:
+        idCampania:
+          type: integer
+        nombre:
+          type: string
+        idUsuario:
+          type: integer
+        fechaHoraProgramacion:
+          type: string
+          format: date-time
+        estado:
+          type: integer
+          enum: [0, 1]
+        mensajes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScheduleCampaignMensajeResponse'
+
+    ValidationError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: ValidationError
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              message:
+                type: string
+
+    DomainErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Código de error de negocio estable (p. ej. CLIENTE_NO_ENCONTRADO).
+        message:
+          type: string
+
+    InternalErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: InternalServerError
+        message:
+          type: string
+          example: Ocurrió un error inesperado

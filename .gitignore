@@ -1,3 +1,14 @@
+# Sinapsis backend — TypeScript / Serverless specifics
+.esbuild/
+*.tsbuildinfo
+
+# Metadata local de Postman Desktop ("Local Mode" / file-based collections)
+# que la app regenera en la raíz al convertir la colección importada a su
+# formato v3. No es parte de la evaluación — la fuente oficial del proyecto
+# sigue siendo docs/postman/*.json (sin tocar por estas reglas).
+/postman/
+/.postman/
+
 # Logs
 logs
 *.log
@@ -66,8 +77,6 @@ web_modules/
 .yarn-integrity
 
 # dotenv environment variable files
-.env
-.env.*
 !.env.example
 
 # parcel-bundler cache (https://parceljs.org/)
@@ -155,3 +164,4 @@ vite.config.ts.timestamp-*
 .nx/cache
 .nx/workspace-data
 .nx/migrate-runs
+config.bat
