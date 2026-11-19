@@ -1,0 +1,75 @@
+service: sinapsis-backend-checkpoint
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  # nodejs20.x: Serverless Framework v3 está congelado (se usa
+  # v3 a propósito para evitar la fricción de cuenta/login de v4 en un
+  # take-home test) y su JSON schema de validación no reconoce nodejs22.x como
+  # runtime válido — emite un warning aunque AWS Lambda sí lo soporta. nodejs20.x
+  # es LTS activo y elimina ese warning sin perder soporte real.
+  runtime: nodejs20.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 10
+  httpApi:
+    cors: true
+  environment:
+    NODE_ENV: ${env:NODE_ENV, 'production'}
+    STAGE: ${sls:stage}
+    DB_HOST: ${env:DB_HOST, ''}
+    DB_PORT: ${env:DB_PORT, '3306'}
+    DB_USER: ${env:DB_USER, ''}
+    DB_PASSWORD: ${env:DB_PASSWORD, ''}
+    DB_NAME: ${env:DB_NAME, ''}
+    DB_POOL_MIN: ${env:DB_POOL_MIN, '0'}
+    DB_POOL_MAX: ${env:DB_POOL_MAX, '2'}
+  # Para un deploy real a AWS, reemplazar los `${env:...}` de arriba por
+  # referencias a SSM Parameter Store (ver docs/DEPLOY.md), p. ej.:
+  #   DB_PASSWORD: ${ssm:/sinapsis/${sls:stage}/db-password}
+
+plugins:
+  - serverless-esbuild
+  - serverless-offline
+
+package:
+  individually: true
+
+functions:
+  api:
+    handler: src/infrastructure/adapter/input/web/lambda.handler
+    description: >-
+      API REST única (Express + serverless-http) que expone /v1/health,
+      /v1/reports/messages-by-status y /v1/campaigns vía una integración
+      proxy catch-all de API Gateway HTTP API.
+    events:
+      - httpApi: '*'
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    target: node20
+    platform: node
+    # Knex hace `require()` de TODOS los drivers que soporta (pg, sqlite3,
+    # mysql, tedious, oracledb, mariadb...) dentro de un switch interno, aunque
+    # el proyecto solo use `mysql2`. esbuild intenta resolver estáticamente
+    # cada require() que ve y falla al bundlear porque esos paquetes no están
+    # instalados (a propósito). Se excluyen para que esbuild los deje como
+    # `require()` nativo en el bundle — nunca se ejecutan en runtime porque el
+    # cliente configurado en knex.ts es siempre 'mysql2'.
+    exclude:
+      - aws-sdk
+      - pg
+      - pg-query-stream
+      - sqlite3
+      - better-sqlite3
+      - mysql
+      - mariadb
+      - tedious
+      - oracledb
+  serverless-offline:
+    httpPort: ${env:HTTP_PORT, '3000'}
+    noPrependStageInUrl: true
